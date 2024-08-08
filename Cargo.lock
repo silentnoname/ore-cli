@@ -2788,6 +2788,7 @@ dependencies = [
  "ore-api",
  "ore-utils",
  "rand 0.8.5",
+ "rayon",
  "reqwest 0.12.4",
  "serde_json",
  "solana-cli-config",

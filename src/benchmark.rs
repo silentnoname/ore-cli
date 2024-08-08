@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Instant};
 use drillx::equix;
+use rayon::prelude::*;
 use solana_rpc_client::spinner;
 
 use crate::{args::BenchmarkArgs, Miner};
@@ -19,47 +20,78 @@ impl Miner {
             TEST_DURATION
         ));
         let core_ids = core_affinity::get_core_ids().unwrap();
-        let handles: Vec<_> = core_ids
-            .into_iter()
-            .map(|i| {
-                std::thread::spawn({
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(args.cores as usize)
+            .build().unwrap();
+        let total_nonces: u64 = pool.install(|| {
+            core_ids
+                .into_par_iter()
+                .take(args.cores as usize)
+                .map(|i| {
                     let mut memory = equix::SolverMemory::new();
-                    move || {
-                        // Return if core should not be used
-                        if (i.id as u64).ge(&args.cores) {
-                            return 0;
+                    let _ = core_affinity::set_for_current(i);
+                    let timer = Instant::now();
+                    let first_nonce = u64::MAX.saturating_div(args.cores).saturating_mul(i.id as u64);
+                    let mut nonce = first_nonce;
+                    loop {
+                        // Create hash
+                        let _hx = drillx::hash_with_memory(&mut memory, &challenge, &nonce.to_le_bytes());
+
+                        // Increment nonce
+                        nonce += 1;
+
+                        // Exit if time has elapsed
+                        if (timer.elapsed().as_secs() as i64).ge(&TEST_DURATION) {
+                            break;
                         }
-                        let _ = core_affinity::set_for_current(i);
-                        let timer = Instant::now();
-                        let first_nonce = u64::MAX.saturating_div(args.cores).saturating_mul(i.id as u64);
-                        let mut nonce = first_nonce;
-                        loop {
-                            // Create hash
-                            let _hx = drillx::hash_with_memory(&mut memory,&challenge, &nonce.to_le_bytes());
-
-                            // Increment nonce
-                            nonce += 1;
-
-                            // Exit if time has elapsed
-                            if (timer.elapsed().as_secs() as i64).ge(&TEST_DURATION) {
-                                break;
-                            }
-                        }
-
-                        // Return hash count
-                        nonce - first_nonce
                     }
-                })
-            })
-            .collect();
 
-        // Join handles and return best nonce
-        let mut total_nonces = 0;
-        for h in handles {
-            if let Ok(count) = h.join() {
-                total_nonces += count;
-            }
-        }
+                    // Return hash count
+                    nonce - first_nonce
+                })
+                .sum() // Collect and sum the nonces
+        });
+        // let handles: Vec<_> = core_ids
+        //     .into_iter()
+        //     .map(|i| {
+        //         std::thread::spawn({
+        //             let mut memory = equix::SolverMemory::new();
+        //             move || {
+        //                 // Return if core should not be used
+        //                 if (i.id as u64).ge(&args.cores) {
+        //                     return 0;
+        //                 }
+        //                 let _ = core_affinity::set_for_current(i);
+        //                 let timer = Instant::now();
+        //                 let first_nonce = u64::MAX.saturating_div(args.cores).saturating_mul(i.id as u64);
+        //                 let mut nonce = first_nonce;
+        //                 loop {
+        //                     // Create hash
+        //                     let _hx = drillx::hash_with_memory(&mut memory,&challenge, &nonce.to_le_bytes());
+        //
+        //                     // Increment nonce
+        //                     nonce += 1;
+        //
+        //                     // Exit if time has elapsed
+        //                     if (timer.elapsed().as_secs() as i64).ge(&TEST_DURATION) {
+        //                         break;
+        //                     }
+        //                 }
+        //
+        //                 // Return hash count
+        //                 nonce - first_nonce
+        //             }
+        //         })
+        //     })
+        //     .collect();
+        //
+        // // Join handles and return best nonce
+        // let mut total_nonces = 0;
+        // for h in handles {
+        //     if let Ok(count) = h.join() {
+        //         total_nonces += count;
+        //     }
+        // }
 
         // Update log
         progress_bar.finish_with_message(format!(
